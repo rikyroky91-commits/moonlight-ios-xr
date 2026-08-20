@@ -1220,6 +1220,32 @@ static NSMutableSet* hostList;
 #endif
 }
 
+/// La barra degli host veniva dimensionata una sola volta in viewDidLoad, dove
+/// self.view ha ancora le dimensioni del nib e non quelle reali: il risultato
+/// era una griglia larga quanto lo schermo in verticale, cioe' meno di meta'
+/// schermo in orizzontale, con le icone fuori posto. Qui le dimensioni sono
+/// definitive, e il metodo viene richiamato anche a ogni cambio di geometria.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+
+    if (hostScrollView == nil) {
+        return;
+    }
+
+    CGFloat navBottom = self.navigationController.navigationBar.frame.origin.y
+                      + self.navigationController.navigationBar.frame.size.height;
+    CGRect target = CGRectMake(0,
+                               navBottom,
+                               self.view.bounds.size.width,
+                               self.view.bounds.size.height / 2);
+
+    // Il confronto evita di ridisporre le icone a ogni passata di layout.
+    if (!CGRectEqualToRect(hostScrollView.frame, target)) {
+        hostScrollView.frame = target;
+        [self updateHosts];
+    }
+}
+
 - (void)updateHosts {
     Log(LOG_I, @"Updating hosts...");
     [[hostScrollView subviews] makeObjectsPerformSelector:@selector(removeFromSuperview)];
