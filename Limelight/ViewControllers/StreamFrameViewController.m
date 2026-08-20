@@ -50,7 +50,10 @@
     UIWindow *_extWindow;
     UIView *_renderView;
     UIWindow *_deviceWindow;
+    UIView *_stereoPanel;
     UIButton *_stereoButton;
+    UISlider *_depthSlider;
+    UILabel *_depthLabel;
 
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
@@ -369,29 +372,78 @@
     _extWindow.hidden = NO;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ScreenConnected" object:self];
 
-    [self setupStereoButton];
+    [self setupStereoControls];
 }
 
-- (void)setupStereoButton {
-    if (_stereoButton != nil) {
+/// Pannello dei comandi XR sul telefono, che durante lo streaming e' altrimenti
+/// nero. Sta in alto al centro perche' e' l'unica fascia che i controlli a
+/// schermo lasciano libera: L1/L2 occupano l'angolo sinistro, R1/R2 il destro.
+- (void)setupStereoControls {
+    if (_stereoPanel != nil) {
         return;
     }
 
-    BOOL on = [[NSUserDefaults standardUserDefaults] boolForKey:@"xrStereoEnabled"];
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    BOOL on = [defaults boolForKey:@"xrStereoEnabled"];
+    float amount = [defaults objectForKey:@"xrDepthAmount"] == nil
+        ? 0.5f
+        : [defaults floatForKey:@"xrDepthAmount"];
+
+    const CGFloat panelWidth = 400;
+    const CGFloat panelHeight = 62;
+    CGRect panelFrame = CGRectMake((self.view.bounds.size.width - panelWidth) / 2.0,
+                                   18, panelWidth, panelHeight);
+
+    _stereoPanel = [[UIView alloc] initWithFrame:panelFrame];
+    _stereoPanel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+    _stereoPanel.layer.cornerRadius = 16;
+    _stereoPanel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin
+                                  | UIViewAutoresizingFlexibleRightMargin;
 
     _stereoButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _stereoButton.frame = CGRectMake(28, 56, 132, 60);
-    _stereoButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15];
-    _stereoButton.layer.cornerRadius = 14;
-    _stereoButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
-    [_stereoButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [_stereoButton setTitle:(on ? @"3D  ON" : @"3D  OFF") forState:UIControlStateNormal];
+    _stereoButton.frame = CGRectMake(10, 9, 92, 44);
+    _stereoButton.layer.cornerRadius = 11;
+    _stereoButton.titleLabel.font = [UIFont boldSystemFontOfSize:19];
     [_stereoButton addTarget:self
                       action:@selector(toggleStereo:)
             forControlEvents:UIControlEventTouchUpInside];
+    [_stereoPanel addSubview:_stereoButton];
 
-    [self.view addSubview:_stereoButton];
-    [self.view bringSubviewToFront:_stereoButton];
+    _depthLabel = [[UILabel alloc] initWithFrame:CGRectMake(112, 6, 278, 18)];
+    _depthLabel.font = [UIFont systemFontOfSize:13];
+    _depthLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+    [_stereoPanel addSubview:_depthLabel];
+
+    _depthSlider = [[UISlider alloc] initWithFrame:CGRectMake(110, 24, 282, 30)];
+    _depthSlider.minimumValue = 0.0f;
+    _depthSlider.maximumValue = 1.0f;
+    _depthSlider.value = amount;
+    _depthSlider.tintColor = [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1.0];
+    [_depthSlider addTarget:self
+                     action:@selector(depthChanged:)
+           forControlEvents:UIControlEventValueChanged];
+    [_stereoPanel addSubview:_depthSlider];
+
+    [self.view addSubview:_stereoPanel];
+    [self.view bringSubviewToFront:_stereoPanel];
+
+    [self refreshStereoControls:on];
+}
+
+- (void)refreshStereoControls:(BOOL)on {
+    [_stereoButton setTitle:(on ? @"3D ON" : @"3D OFF") forState:UIControlStateNormal];
+    [_stereoButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _stereoButton.backgroundColor = on
+        ? [UIColor colorWithRed:0.15 green:0.5 blue:0.9 alpha:0.9]
+        : [UIColor colorWithWhite:1.0 alpha:0.16];
+
+    // Lo slider resta visibile ma spento quando il 3D e' off, cosi' si capisce
+    // che esiste e a cosa e' legato.
+    _depthSlider.enabled = on;
+    _depthSlider.alpha = on ? 1.0 : 0.35;
+    _depthLabel.alpha = on ? 1.0 : 0.35;
+    _depthLabel.text = [NSString stringWithFormat:@"Profondita'  %d%%",
+                        (int)roundf(_depthSlider.value * 100.0f)];
 }
 
 - (void)toggleStereo:(id)sender {
@@ -399,8 +451,16 @@
     BOOL on = ![defaults boolForKey:@"xrStereoEnabled"];
     [defaults setBool:on forKey:@"xrStereoEnabled"];
 
-    [_stereoButton setTitle:(on ? @"3D  ON" : @"3D  OFF") forState:UIControlStateNormal];
+    [self refreshStereoControls:on];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"XRStereoToggled" object:@(on)];
+}
+
+- (void)depthChanged:(UISlider *)sender {
+    [[NSUserDefaults standardUserDefaults] setFloat:sender.value forKey:@"xrDepthAmount"];
+    _depthLabel.text = [NSString stringWithFormat:@"Profondita'  %d%%",
+                        (int)roundf(sender.value * 100.0f)];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XRDepthAmountChanged"
+                                                        object:@(sender.value)];
 }
 
 - (void)removeExtScreen {
@@ -408,8 +468,11 @@
     _extWindow.hidden = YES;
     _renderView.bounds = _deviceWindow.bounds;
     _renderView.frame = _deviceWindow.frame;
-    [_stereoButton removeFromSuperview];
+    [_stereoPanel removeFromSuperview];
+    _stereoPanel = nil;
     _stereoButton = nil;
+    _depthSlider = nil;
+    _depthLabel = nil;
     [self.view insertSubview:_renderView atIndex:0];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ScreenDisconnected" object:self];
 }

@@ -159,7 +159,12 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         return;
     }
 
-    xrRenderer.stereoEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"xrStereoEnabled"];
+    NSUserDefaults* xrDefaults = [NSUserDefaults standardUserDefaults];
+    xrRenderer.stereoEnabled = [xrDefaults boolForKey:@"xrStereoEnabled"];
+    float depthAmount = [xrDefaults objectForKey:@"xrDepthAmount"] == nil
+        ? 0.5f
+        : [xrDefaults floatForKey:@"xrDepthAmount"];
+    xrRenderer.maxDisparity = depthAmount * 0.025f;
 
     // Il video esce solo dagli occhiali: sul telefono il display layer resta
     // nascosto e lo schermo fa da pannello comandi.
@@ -174,6 +179,14 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     BOOL enabled = [notification.object boolValue];
     xrRenderer.stereoEnabled = enabled;
     Log(LOG_I, @"XR: stereo %@", enabled ? @"attivo" : @"disattivo");
+}
+
+/// Il cursore va da 0 a 1; la disparita' massima utile arriva a circa il 2,5%
+/// della larghezza, oltre il quale le due immagini non si fondono piu'.
+- (void)xrDepthAmountChanged:(NSNotification*)notification
+{
+    float amount = [notification.object floatValue];
+    xrRenderer.maxDisparity = amount * 0.025f;
 }
 
 - (BOOL)xrEnsureSessionForFormat:(CMVideoFormatDescriptionRef)desc
@@ -275,6 +288,10 @@ static void XRDecompressionCallback(void* decompressionOutputRefCon,
     [center addObserver:self
                selector:@selector(xrStereoToggled:)
                    name:@"XRStereoToggled"
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(xrDepthAmountChanged:)
+                   name:@"XRDepthAmountChanged"
                  object:nil];
 
     return self;
