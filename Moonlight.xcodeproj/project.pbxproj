@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AE0000000000000000000009 /* XRDepthEstimator.m in Sources */ = {isa = PBXBuildFile; fileRef = AE0000000000000000000008 /* XRDepthEstimator.m */; };
+		AE000000000000000000000B /* DepthAnythingV2SmallF16.mlpackage in Resources */ = {isa = PBXBuildFile; fileRef = AE000000000000000000000A /* DepthAnythingV2SmallF16.mlpackage */; };
+		AE0000000000000000000005 /* XRStereoRenderer.m in Sources */ = {isa = PBXBuildFile; fileRef = AE0000000000000000000003 /* XRStereoRenderer.m */; };
+		AE0000000000000000000006 /* XRShaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = AE0000000000000000000004 /* XRShaders.metal */; };
 		693B3A9B218638CD00982F7B /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 693B3A9A218638CD00982F7B /* Settings.bundle */; };
 		98181BE92791277400E43572 /* libSDL2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 98181BE82791275D00E43572 /* libSDL2.a */; };
 		98181BEB2791278F00E43572 /* libSDL2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 98181BEA2791278300E43572 /* libSDL2.a */; };
@@ -170,6 +174,12 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		AE0000000000000000000007 /* XRDepthEstimator.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = XRDepthEstimator.h; sourceTree = "<group>"; };
+		AE0000000000000000000008 /* XRDepthEstimator.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = XRDepthEstimator.m; sourceTree = "<group>"; };
+		AE000000000000000000000A /* DepthAnythingV2SmallF16.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper.mlpackage; name = DepthAnythingV2SmallF16.mlpackage; path = Models/DepthAnythingV2SmallF16.mlpackage; sourceTree = "<group>"; };
+		AE0000000000000000000002 /* XRStereoRenderer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = XRStereoRenderer.h; sourceTree = "<group>"; };
+		AE0000000000000000000003 /* XRStereoRenderer.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = XRStereoRenderer.m; sourceTree = "<group>"; };
+		AE0000000000000000000004 /* XRShaders.metal */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.metal; path = XRShaders.metal; sourceTree = "<group>"; };
 		566E9D2B2770B23A00EF7BFE /* Moonlight v1.7.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "Moonlight v1.7.xcdatamodel"; sourceTree = "<group>"; };
 		693B3A9A218638CD00982F7B /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
 		9803CCAB254F9EAF00EE185E /* ConnectionCallbacks.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ConnectionCallbacks.h; sourceTree = "<group>"; };
@@ -365,6 +375,19 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		AE0000000000000000000001 /* XR */ = {
+			isa = PBXGroup;
+			children = (
+				AE0000000000000000000002 /* XRStereoRenderer.h */,
+				AE0000000000000000000003 /* XRStereoRenderer.m */,
+				AE0000000000000000000004 /* XRShaders.metal */,
+				AE0000000000000000000007 /* XRDepthEstimator.h */,
+				AE0000000000000000000008 /* XRDepthEstimator.m */,
+				AE000000000000000000000A /* DepthAnythingV2SmallF16.mlpackage */,
+			);
+			path = XR;
+			sourceTree = "<group>";
+		};
 		9896219423D15C2900211983 /* X1Kit */ = {
 			isa = PBXGroup;
 			children = (
@@ -450,6 +473,7 @@
 				FB89460919F646E200339C8A /* Input */,
 				FB89460E19F646E200339C8A /* Network */,
 				FB89461519F646E200339C8A /* Stream */,
+				AE0000000000000000000001 /* XR */,
 				FB89461E19F646E200339C8A /* Utility */,
 				FB89462319F646E200339C8A /* ViewControllers */,
 				FBD3495F1A004453002D2A60 /* Database */,
@@ -816,6 +840,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AE000000000000000000000B /* DepthAnythingV2SmallF16.mlpackage in Resources */,
 				FB290E7919B37D81004C83CF /* iPad.storyboard in Resources */,
 				FB290CFE19B2C406004C83CF /* InfoPlist.strings in Resources */,
 				FB290E7B19B38036004C83CF /* iPhone.storyboard in Resources */,
@@ -884,6 +909,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AE0000000000000000000009 /* XRDepthEstimator.m in Sources */,
+				AE0000000000000000000005 /* XRStereoRenderer.m in Sources */,
+				AE0000000000000000000006 /* XRShaders.metal in Sources */,
 				FB290D0719B2C406004C83CF /* Limelight.xcdatamodeld in Sources */,
 				9819CC22254F180F008A7C8E /* AbsoluteTouchHandler.m in Sources */,
 				9819CC14254F107A008A7C8E /* RelativeTouchHandler.m in Sources */,
@@ -1229,7 +1257,8 @@
 					"$(PROJECT_DIR)/libs/FFmpeg/lib/iOS-Sim",
 				);
 				MARKETING_VERSION = 9.0.2;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.moonlight-stream.Moonlight";
+				COREML_CODEGEN_LANGUAGE = None;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.moonlight-stream.MoonlightXR";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
 				SKIP_INSTALL = NO;
@@ -1279,7 +1308,8 @@
 					"$(PROJECT_DIR)/libs/FFmpeg/lib/iOS-Sim",
 				);
 				MARKETING_VERSION = 9.0.2;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.moonlight-stream.Moonlight";
+				COREML_CODEGEN_LANGUAGE = None;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.moonlight-stream.MoonlightXR";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
 				SKIP_INSTALL = NO;

@@ -1,0 +1,5 @@
+# Il pacchetto Core ML è binario: nessuna conversione di fine riga,
+# che lo corromperebbe silenziosamente.
+*.mlpackage/** binary
+*.bin binary
+*.mlmodel binary

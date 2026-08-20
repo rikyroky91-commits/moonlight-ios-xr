@@ -1,0 +1,55 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ master, main, xr ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout (con submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Info toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project Moonlight.xcodeproj || true
+
+      - name: Build (unsigned, iphoneos arm64)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Moonlight.xcodeproj \
+            -target Moonlight \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Impacchetta .ipa
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then echo "Nessuna .app prodotta"; exit 1; fi
+          echo "App trovata: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry Moonlight-XR-unsigned.ipa Payload
+          ls -lh Moonlight-XR-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moonlight-XR-unsigned-ipa
+          path: Moonlight-XR-unsigned.ipa
+          if-no-files-found: error

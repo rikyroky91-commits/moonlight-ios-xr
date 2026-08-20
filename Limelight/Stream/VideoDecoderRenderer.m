@@ -8,6 +8,23 @@
 
 #import "VideoDecoderRenderer.h"
 #import "StreamView.h"
+#import "XRStereoRenderer.h"
+
+@import VideoToolbox;
+
+// Prototipo: la callback e' definita in fondo all'implementazione ma
+// referenziata nella creazione della sessione, piu' in alto.
+static void XRDecompressionCallback(void* decompressionOutputRefCon,
+                                    void* sourceFrameRefCon,
+                                    OSStatus status,
+                                    VTDecodeInfoFlags infoFlags,
+                                    CVImageBufferRef imageBuffer,
+                                    CMTime presentationTimeStamp,
+                                    CMTime presentationDuration);
+
+@interface VideoDecoderRenderer ()
+- (void)xrHandleDecodedFrame:(CVImageBufferRef)imageBuffer;
+@end
 
 #include <libavcodec/avcodec.h>
 #include <libavcodec/cbs.h>
@@ -20,7 +37,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
                               int write_seq_header);
 
 @implementation VideoDecoderRenderer {
-    StreamView* _view;
+    UIView* _view;
     id<ConnectionCallbacks> _callbacks;
     float _streamAspectRatio;
     
@@ -35,6 +52,16 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     
     CADisplayLink* _displayLink;
     BOOL framePacing;
+
+    // --- percorso stereo XR ---
+    // Quando attivo il frame non va all'AVSampleBufferDisplayLayer ma passa per
+    // una VTDecompressionSession, che ci restituisce i CVPixelBuffer su cui
+    // possiamo lavorare in Metal.
+    BOOL xrEnabled;
+    VTDecompressionSessionRef xrSession;
+    CMVideoFormatDescriptionRef xrSessionFormatDesc;
+    CAMetalLayer* xrMetalLayer;
+    XRStereoRenderer* xrRenderer;
 }
 
 - (void)reinitializeDisplayLayer
@@ -75,9 +102,153 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         CFRelease(formatDesc);
         formatDesc = nil;
     }
+
+    [self xrSetupLayerIfNeeded];
 }
 
-- (id)initWithView:(StreamView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio useFramePacing:(BOOL)useFramePacing
+#pragma mark - Percorso stereo XR
+
+- (BOOL)xrIsOnExternalScreen
+{
+    UIScreen* screen = _view.window.screen;
+    return screen != nil && screen != [UIScreen mainScreen];
+}
+
+- (void)xrSetupLayerIfNeeded
+{
+    // Ricostruiamo da zero a ogni cambio di schermo: questo metodo viene
+    // richiamato sia alla connessione sia alla disconnessione degli occhiali.
+    if (xrMetalLayer != nil) {
+        [xrMetalLayer removeFromSuperlayer];
+        xrMetalLayer = nil;
+        xrRenderer = nil;
+    }
+    [self xrDestroySession];
+
+    xrEnabled = [self xrIsOnExternalScreen];
+    if (!xrEnabled) {
+        // Nessun display esterno: percorso standard di Moonlight. Il display
+        // layer resta nascosto finche' non arriva il primo IDR, altrimenti
+        // coprirebbe l'indicatore di caricamento.
+        return;
+    }
+
+    // A differenza del display layer, che rispetta l'aspect ratio del video, il
+    // layer stereo copre tutta la view: il confine fra meta' sinistra e destra
+    // deve cadere esattamente sul centro del frame che arriva agli occhiali.
+    UIScreen* screen = _view.window.screen;
+    CGFloat scale = screen != nil ? screen.scale : 1.0;
+
+    xrMetalLayer = [CAMetalLayer layer];
+    xrMetalLayer.frame = _view.bounds;
+    xrMetalLayer.contentsScale = scale;
+    // Su un display esterno 1920x1080 questo da' esattamente 1920x1080 pixel:
+    // 960 per occhio, che e' il formato half-SBS atteso dagli occhiali.
+    xrMetalLayer.drawableSize = CGSizeMake(_view.bounds.size.width * scale,
+                                           _view.bounds.size.height * scale);
+    xrMetalLayer.backgroundColor = [UIColor blackColor].CGColor;
+    xrMetalLayer.hidden = YES;
+    [_view.layer addSublayer:xrMetalLayer];
+
+    xrRenderer = [[XRStereoRenderer alloc] initWithLayer:xrMetalLayer];
+    if (xrRenderer == nil) {
+        Log(LOG_E, @"XR: renderer non inizializzato, ricado sul percorso standard");
+        [xrMetalLayer removeFromSuperlayer];
+        xrMetalLayer = nil;
+        xrEnabled = NO;
+        return;
+    }
+
+    xrRenderer.stereoEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"xrStereoEnabled"];
+
+    // Il video esce solo dagli occhiali: sul telefono il display layer resta
+    // nascosto e lo schermo fa da pannello comandi.
+    displayLayer.hidden = YES;
+
+    Log(LOG_I, @"XR: percorso stereo attivo su schermo esterno %.0fx%.0f",
+        _view.bounds.size.width * scale, _view.bounds.size.height * scale);
+}
+
+- (void)xrStereoToggled:(NSNotification*)notification
+{
+    BOOL enabled = [notification.object boolValue];
+    xrRenderer.stereoEnabled = enabled;
+    Log(LOG_I, @"XR: stereo %@", enabled ? @"attivo" : @"disattivo");
+}
+
+- (BOOL)xrEnsureSessionForFormat:(CMVideoFormatDescriptionRef)desc
+{
+    if (xrSession != NULL &&
+        VTDecompressionSessionCanAcceptFormatDescription(xrSession, desc)) {
+        return YES;
+    }
+
+    [self xrDestroySession];
+
+    // Chiediamo esplicitamente NV12 a 8 bit: lo shader assume quel layout, e in
+    // HDR VideoToolbox produrrebbe altrimenti un formato a 10 bit.
+    NSDictionary* destAttrs = @{
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+    };
+
+    VTDecompressionOutputCallbackRecord callback;
+    callback.decompressionOutputCallback = XRDecompressionCallback;
+    callback.decompressionOutputRefCon = (__bridge void*)self;
+
+    OSStatus status = VTDecompressionSessionCreate(kCFAllocatorDefault,
+                                                   desc,
+                                                   NULL,
+                                                   (__bridge CFDictionaryRef)destAttrs,
+                                                   &callback,
+                                                   &xrSession);
+    if (status != noErr) {
+        Log(LOG_E, @"XR: VTDecompressionSessionCreate fallita: %d", (int)status);
+        xrSession = NULL;
+        return NO;
+    }
+
+    xrSessionFormatDesc = (CMVideoFormatDescriptionRef)CFRetain(desc);
+    Log(LOG_I, @"XR: sessione di decodifica creata");
+    return YES;
+}
+
+- (void)xrDestroySession
+{
+    if (xrSession != NULL) {
+        VTDecompressionSessionWaitForAsynchronousFrames(xrSession);
+        VTDecompressionSessionInvalidate(xrSession);
+        CFRelease(xrSession);
+        xrSession = NULL;
+    }
+    if (xrSessionFormatDesc != NULL) {
+        CFRelease(xrSessionFormatDesc);
+        xrSessionFormatDesc = NULL;
+    }
+}
+
+- (void)xrHandleDecodedFrame:(CVImageBufferRef)imageBuffer
+{
+    [xrRenderer renderPixelBuffer:imageBuffer];
+}
+
+static void XRDecompressionCallback(void* decompressionOutputRefCon,
+                                    void* sourceFrameRefCon,
+                                    OSStatus status,
+                                    VTDecodeInfoFlags infoFlags,
+                                    CVImageBufferRef imageBuffer,
+                                    CMTime presentationTimeStamp,
+                                    CMTime presentationDuration)
+{
+    if (status != noErr || imageBuffer == NULL || (infoFlags & kVTDecodeInfo_FrameDropped)) {
+        return;
+    }
+
+    VideoDecoderRenderer* renderer = (__bridge VideoDecoderRenderer*)decompressionOutputRefCon;
+    [renderer xrHandleDecodedFrame:imageBuffer];
+}
+
+- (id)initWithView:(UIView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio useFramePacing:(BOOL)useFramePacing
 {
     self = [super init];
     
@@ -87,10 +258,31 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     framePacing = useFramePacing;
     
     parameterSetBuffers = [[NSMutableArray alloc] init];
-    
+
     [self reinitializeDisplayLayer];
-    
+
+    // Ogni cambio di schermo ricostruisce il layer: e' il momento in cui il
+    // percorso stereo si attiva o si spegne.
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    [center addObserver:self
+               selector:@selector(reinitializeDisplayLayer)
+                   name:@"ScreenConnected"
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(reinitializeDisplayLayer)
+                   name:@"ScreenDisconnected"
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(xrStereoToggled:)
+                   name:@"XRStereoToggled"
+                 object:nil];
+
     return self;
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)setupWithVideoFormat:(int)videoFormat width:(int)videoWidth height:(int)videoHeight frameRate:(int)frameRate
@@ -143,6 +335,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 - (void)stop
 {
     [_displayLink invalidate];
+    [self xrDestroySession];
 }
 
 #define NALU_START_PREFIX_SIZE 3
@@ -595,12 +788,32 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     }
 
     // Enqueue the next frame
-    [self->displayLayer enqueueSampleBuffer:sampleBuffer];
-    
+    if (xrEnabled && [self xrEnsureSessionForFormat:formatDesc]) {
+        // Decodifica sincrona: su A17 costa pochi ms e ci evita di riordinare i
+        // frame in uscita, che a bassa latenza aggiungerebbe ritardo senza
+        // alcun guadagno.
+        OSStatus decodeStatus = VTDecompressionSessionDecodeFrame(self->xrSession,
+                                                                  sampleBuffer,
+                                                                  0,
+                                                                  NULL,
+                                                                  NULL);
+        if (decodeStatus != noErr) {
+            Log(LOG_W, @"XR: decodifica fallita: %d", (int)decodeStatus);
+        }
+    }
+    else {
+        [self->displayLayer enqueueSampleBuffer:sampleBuffer];
+    }
+
     if (du->frameType == FRAME_TYPE_IDR) {
         // Ensure the layer is visible now
-        self->displayLayer.hidden = NO;
-        
+        if (xrEnabled) {
+            self->xrMetalLayer.hidden = NO;
+        }
+        else {
+            self->displayLayer.hidden = NO;
+        }
+
         // Tell our parent VC to hide the progress indicator
         [self->_callbacks videoContentShown];
     }
