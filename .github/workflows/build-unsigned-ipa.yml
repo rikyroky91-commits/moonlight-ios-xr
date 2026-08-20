@@ -10,6 +10,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
 
+    # Serve a pubblicare la release con l'IPA allegato.
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout (con submodules)
         uses: actions/checkout@v4
@@ -47,9 +51,30 @@ jobs:
           zip -qry Moonlight-XR-unsigned.ipa Payload
           ls -lh Moonlight-XR-unsigned.ipa
 
-      - name: Upload IPA
+      - name: Verifica contenuto del bundle
+        run: |
+          APP=$(find build/products -maxdepth 1 -name "*.app" | head -1)
+          echo "--- modello Core ML ---"
+          ls -d "$APP"/*.mlmodelc 2>/dev/null || echo "ATTENZIONE: nessun .mlmodelc nel bundle"
+          echo "--- shader Metal ---"
+          ls -l "$APP"/default.metallib 2>/dev/null || echo "ATTENZIONE: default.metallib assente"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Moonlight-XR-unsigned-ipa
           path: Moonlight-XR-unsigned.ipa
           if-no-files-found: error
+
+      # L'artifact e' scaricabile solo da loggati e arriva zippato, il che lo
+      # rende scomodo da prendere direttamente dall'iPhone. La release espone
+      # invece l'IPA nudo, con un link pubblico apribile da Safari.
+      - name: Pubblica release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" Moonlight-XR-unsigned.ipa \
+            --title "Build $TAG" \
+            --notes "IPA non firmato, da installare con AltStore o SideStore. Commit ${{ github.sha }}" \
+            --latest

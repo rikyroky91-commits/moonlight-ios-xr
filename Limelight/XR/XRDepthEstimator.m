@@ -99,7 +99,12 @@ static NSString* const kOutputFeatureName = @"depth";
     // Deliberatamente senza GPU: la GPU serve al warp stereo, e lasciarli
     // competere farebbe crollare entrambi. Sull'ANE l'inferenza e' in pratica
     // gratuita rispetto al budget di frame.
-    config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+    if (@available(iOS 16.0, tvOS 16.0, *)) {
+        config.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+    }
+    else {
+        config.computeUnits = MLComputeUnitsAll;
+    }
 
     NSError* error = nil;
     _model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
