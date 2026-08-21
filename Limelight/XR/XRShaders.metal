@@ -33,6 +33,9 @@ struct XRStabilizeUniforms {
     // Quanto una variazione di luminanza spinge alpha verso alphaMax: dove il
     // colore cambia c'e' movimento vero e la profondita' nuova va creduta.
     float motionGain;
+    // Di quanti frame la stima grezza e' indietro rispetto al colore. Serve a
+    // riportarla sulla geometria attuale prima di usarla.
+    float rawLag;
 };
 
 struct XRDisparityUniforms {
@@ -57,6 +60,18 @@ struct XRVertexOut {
 };
 
 constant uint kHistogramBins = 64;
+
+// Ricerca del movimento globale: spostamenti da -16 a +16 texel in orizzontale
+// e da -10 a +10 in verticale, a passi di 2, valutati su una griglia ridotta.
+constant int kMotionHalfX = 8;      // moltiplicato per kMotionStep
+constant int kMotionHalfY = 5;
+constant int kMotionStep = 2;
+constant uint kMotionCountX = 17;   // 2 * kMotionHalfX + 1
+constant uint kMotionCountY = 11;
+constant uint kMotionCandidates = 187;
+constant uint kMotionThreads = 64;
+constant uint kMotionGridX = 64;
+constant uint kMotionGridY = 48;
 
 // ------------------------------------------------------ utilita' di colore
 
@@ -102,27 +117,40 @@ kernel void xr_prepare_input(texture2d<float, access::sample> lumaTex    [[textu
 
 // ------------------------------------------ 2. stabilizzazione temporale
 
-kernel void xr_depth_stabilize(texture2d<float, access::read>  rawDepth   [[texture(0)]],
-                               texture2d<float, access::read>  prevStable [[texture(1)]],
-                               texture2d<float, access::read>  lumaCur    [[texture(2)]],
-                               texture2d<float, access::read>  lumaPrev   [[texture(3)]],
-                               texture2d<float, access::write> stableOut  [[texture(4)]],
-                               device atomic_uint*             histogram  [[buffer(0)]],
-                               constant XRStabilizeUniforms&   u          [[buffer(1)]],
-                               uint2                           gid        [[thread_position_in_grid]])
+kernel void xr_depth_stabilize(texture2d<float, access::sample> rawDepth   [[texture(0)]],
+                               texture2d<float, access::sample> prevStable [[texture(1)]],
+                               texture2d<float, access::sample> lumaCur    [[texture(2)]],
+                               texture2d<float, access::sample> lumaPrev   [[texture(3)]],
+                               texture2d<float, access::write>  stableOut  [[texture(4)]],
+                               device atomic_uint*              histogram  [[buffer(0)]],
+                               constant XRStabilizeUniforms&    u          [[buffer(1)]],
+                               device const float2*             motion     [[buffer(2)]],
+                               uint2                            gid        [[thread_position_in_grid]])
 {
-    if (gid.x >= stableOut.get_width() || gid.y >= stableOut.get_height()) {
+    const uint width = stableOut.get_width();
+    const uint height = stableOut.get_height();
+    if (gid.x >= width || gid.y >= height) {
         return;
     }
 
-    float current = rawDepth.read(gid).r;
-    float previous = prevStable.read(gid).r;
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(width, height);
 
-    // Alpha adattivo per pixel: fermo si filtra molto, in movimento si segue il
-    // dato nuovo. Un alpha fisso obbligherebbe a scegliere fra sfarfallio sulle
-    // scene statiche e scie sulle panoramiche.
-    float motion = abs(lumaCur.read(gid).r - lumaPrev.read(gid).r);
-    float alpha = clamp(u.alphaMin + motion * u.motionGain, u.alphaMin, u.alphaMax);
+    // Spostamento che porta dalla posizione attuale a quella corrispondente nel
+    // frame precedente: e' esattamente cio' che la ricerca ha minimizzato, per
+    // cui il segno e' definito dalla ricerca stessa e non va indovinato.
+    float2 shift = motion[0] / float2(width, height);
+
+    // Entrambe le mappe vengono riportate sulla geometria di adesso prima di
+    // essere fuse. Senza questo passaggio si mediavano inquadrature diverse, ed
+    // e' quello che produceva artefatti solo durante il movimento.
+    float current = rawDepth.sample(smp, uv + shift * u.rawLag).r;
+    float previous = prevStable.sample(smp, uv + shift).r;
+
+    // Residuo dopo la compensazione: resta alto solo dove qualcosa si e' mosso
+    // per conto suo, non per il movimento della telecamera.
+    float residual = abs(lumaCur.sample(smp, uv).r - lumaPrev.sample(smp, uv + shift).r);
+    float alpha = clamp(u.alphaMin + residual * u.motionGain, u.alphaMin, u.alphaMax);
 
     // Al primo frame previous vale 0 e non va mescolato.
     float stable = (previous > 0.0) ? mix(previous, current, alpha) : current;
@@ -132,6 +160,73 @@ kernel void xr_depth_stabilize(texture2d<float, access::read>  rawDepth   [[text
     // scala ostaggio di un singolo pixel anomalo.
     uint bin = uint(clamp(stable, 0.0, 0.999) * float(kHistogramBins));
     atomic_fetch_add_explicit(&histogram[bin], 1u, memory_order_relaxed);
+}
+
+// ------------------------- 2b. stima del movimento globale dell'inquadratura
+
+// Per ogni spostamento candidato somma la differenza assoluta fra il frame
+// corrente e il precedente traslato. Il candidato con somma minima e' lo
+// spostamento dell'inquadratura: in un gioco la telecamera produce quasi sempre
+// una traslazione dominante, che basta a riallineare le mappe di profondita'.
+kernel void xr_motion_search(texture2d<float, access::sample> lumaCur  [[texture(0)]],
+                             texture2d<float, access::sample> lumaPrev [[texture(1)]],
+                             device float*                    scores   [[buffer(0)]],
+                             uint  group  [[threadgroup_position_in_grid]],
+                             uint  tid    [[thread_position_in_threadgroup]])
+{
+    threadgroup float partial[kMotionThreads];
+
+    int cx = (int(group % kMotionCountX) - kMotionHalfX) * kMotionStep;
+    int cy = (int(group / kMotionCountX) - kMotionHalfY) * kMotionStep;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 texel = 1.0 / float2(lumaCur.get_width(), lumaCur.get_height());
+    float2 offset = float2(cx, cy) * texel;
+
+    float sum = 0.0;
+    for (uint i = tid; i < kMotionGridX * kMotionGridY; i += kMotionThreads) {
+        float2 uv = (float2(i % kMotionGridX, i / kMotionGridX) + 0.5)
+                  / float2(kMotionGridX, kMotionGridY);
+        sum += abs(lumaCur.sample(smp, uv).r - lumaPrev.sample(smp, uv + offset).r);
+    }
+
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = kMotionThreads / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            partial[tid] += partial[tid + s];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        scores[group] = partial[0];
+    }
+}
+
+kernel void xr_motion_pick(device const float* scores [[buffer(0)]],
+                           device float2*      motion [[buffer(1)]],
+                           uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0) {
+        return;
+    }
+
+    float best = scores[0];
+    uint bestIndex = 0;
+    for (uint i = 1; i < kMotionCandidates; i++) {
+        if (scores[i] < best) {
+            best = scores[i];
+            bestIndex = i;
+        }
+    }
+
+    float cx = float((int(bestIndex % kMotionCountX) - kMotionHalfX) * kMotionStep);
+    float cy = float((int(bestIndex / kMotionCountX) - kMotionHalfY) * kMotionStep);
+
+    // Un filo di inerzia sullo spostamento: la ricerca e' quantizzata a due
+    // texel e senza smorzamento salterebbe fra valori adiacenti.
+    motion[0] = mix(motion[0], float2(cx, cy), 0.6);
 }
 
 // ------------------------------- 3. upsampling guidato e calcolo disparita'

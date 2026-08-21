@@ -18,6 +18,10 @@ static const NSUInteger kDisparityHeight = 540;
 
 static const NSUInteger kHistogramBins = 64;
 
+// Deve restare allineato alle costanti dello shader.
+static const NSUInteger kMotionCandidates = 187;
+static const NSUInteger kMotionThreads = 64;
+
 // Frazioni dell'istogramma scartate agli estremi per la normalizzazione: senza
 // questo margine un riflesso speculare o una porzione di cielo sposterebbero
 // l'intera scala di profondita'.
@@ -34,6 +38,7 @@ typedef struct {
     float alphaMin;
     float alphaMax;
     float motionGain;
+    float rawLag;
 } XRStabilizeUniforms;
 
 typedef struct {
@@ -58,6 +63,8 @@ typedef struct {
     id<MTLCommandQueue> _queue;
 
     id<MTLComputePipelineState> _preparePipeline;
+    id<MTLComputePipelineState> _motionSearchPipeline;
+    id<MTLComputePipelineState> _motionPickPipeline;
     id<MTLComputePipelineState> _stabilizePipeline;
     id<MTLComputePipelineState> _disparityPipeline;
     id<MTLRenderPipelineState> _warpPipeline;
@@ -73,6 +80,8 @@ typedef struct {
 
     id<MTLTexture> _disparityTexture;
     id<MTLBuffer> _histogramBuffer;
+    id<MTLBuffer> _motionScores;
+    id<MTLBuffer> _motionVector;
 
     // Intervallo di profondita' filtrato, aggiornato dal completion handler.
     float _depthLo;
@@ -140,7 +149,9 @@ typedef struct {
 - (BOOL)buildPipelinesWithLibrary:(id<MTLLibrary>)library {
     NSError* error = nil;
 
-    NSArray<NSString*>* computeNames = @[@"xr_prepare_input", @"xr_depth_stabilize", @"xr_disparity_build"];
+    NSArray<NSString*>* computeNames = @[@"xr_prepare_input", @"xr_motion_search",
+                                        @"xr_motion_pick", @"xr_depth_stabilize",
+                                        @"xr_disparity_build"];
     NSMutableArray* computePipelines = [NSMutableArray array];
     for (NSString* name in computeNames) {
         id<MTLFunction> fn = [library newFunctionWithName:name];
@@ -156,8 +167,10 @@ typedef struct {
         [computePipelines addObject:pipeline];
     }
     _preparePipeline = computePipelines[0];
-    _stabilizePipeline = computePipelines[1];
-    _disparityPipeline = computePipelines[2];
+    _motionSearchPipeline = computePipelines[1];
+    _motionPickPipeline = computePipelines[2];
+    _stabilizePipeline = computePipelines[3];
+    _disparityPipeline = computePipelines[4];
 
     id<MTLFunction> vertexFn = [library newFunctionWithName:@"xr_vertex"];
     if (vertexFn == nil) {
@@ -223,6 +236,14 @@ typedef struct {
 
     _histogramBuffer = [_device newBufferWithLength:kHistogramBins * sizeof(uint32_t)
                                             options:MTLResourceStorageModeShared];
+
+    _motionScores = [_device newBufferWithLength:kMotionCandidates * sizeof(float)
+                                         options:MTLResourceStorageModePrivate];
+    // Parte da zero: nessuno spostamento finche' non c'e' un frame precedente.
+    vector_float2 zero = (vector_float2){0.0f, 0.0f};
+    _motionVector = [_device newBufferWithBytes:&zero
+                                         length:sizeof(zero)
+                                        options:MTLResourceStorageModePrivate];
 }
 
 - (void)dealloc {
@@ -377,6 +398,23 @@ typedef struct {
     const NSUInteger current = _pingPong;
     const NSUInteger previous = _pingPong ^ 1;
 
+    // Stima dello spostamento dell'inquadratura fra il frame precedente e
+    // questo, valutando in parallelo tutti gli spostamenti candidati.
+    id<MTLComputeCommandEncoder> motion = [commandBuffer computeCommandEncoder];
+    [motion setComputePipelineState:_motionSearchPipeline];
+    [motion setTexture:_lumaSmall[current] atIndex:0];
+    [motion setTexture:_lumaSmall[previous] atIndex:1];
+    [motion setBuffer:_motionScores offset:0 atIndex:0];
+    [motion dispatchThreadgroups:MTLSizeMake(kMotionCandidates, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(kMotionThreads, 1, 1)];
+
+    [motion setComputePipelineState:_motionPickPipeline];
+    [motion setBuffer:_motionScores offset:0 atIndex:0];
+    [motion setBuffer:_motionVector offset:0 atIndex:1];
+    [motion dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [motion endEncoding];
+
     id<MTLComputeCommandEncoder> stabilize = [commandBuffer computeCommandEncoder];
     [stabilize setComputePipelineState:_stabilizePipeline];
     [stabilize setTexture:rawDepth atIndex:0];
@@ -394,8 +432,12 @@ typedef struct {
         .alphaMin = 0.05f,
         .alphaMax = 0.30f,
         .motionGain = 1.5f,
+        // L'inferenza dura circa un frame e il risultato e' disponibile due
+        // frame dopo quello da cui e' partita.
+        .rawLag = 1.5f,
     };
     [stabilize setBytes:&stabilizeUniforms length:sizeof(stabilizeUniforms) atIndex:1];
+    [stabilize setBuffer:_motionVector offset:0 atIndex:2];
     [self dispatch:stabilize pipeline:_stabilizePipeline width:kXRDepthWidth height:kXRDepthHeight];
     [stabilize endEncoding];
 
