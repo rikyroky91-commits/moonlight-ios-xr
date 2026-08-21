@@ -30,6 +30,11 @@
 - (id)initWithRefreshRate:(float)arg1 videoDynamicRange:(int)arg2;
 @end
 
+// Il riconoscitore che risveglia il pannello XR ha bisogno di un delegato
+// per convivere con i gesti gia' presenti sulla view di gioco.
+@interface StreamFrameViewController () <UIGestureRecognizerDelegate>
+@end
+
 @implementation StreamFrameViewController {
     ControllerSupport *_controllerSupport;
     StreamManager *_streamMan;
@@ -52,8 +57,10 @@
     UIWindow *_deviceWindow;
     UIView *_stereoPanel;
     UIButton *_stereoButton;
+    UISegmentedControl *_modeSelector;
     UISlider *_depthSlider;
     UILabel *_depthLabel;
+    NSTimer *_panelHideTimer;
 
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
@@ -389,8 +396,8 @@
         ? 0.5f
         : [defaults floatForKey:@"xrDepthAmount"];
 
-    const CGFloat panelWidth = 400;
-    const CGFloat panelHeight = 62;
+    const CGFloat panelWidth = 560;
+    const CGFloat panelHeight = 66;
     CGRect panelFrame = CGRectMake((self.view.bounds.size.width - panelWidth) / 2.0,
                                    18, panelWidth, panelHeight);
 
@@ -401,20 +408,34 @@
                                   | UIViewAutoresizingFlexibleRightMargin;
 
     _stereoButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _stereoButton.frame = CGRectMake(10, 9, 92, 44);
+    _stereoButton.frame = CGRectMake(10, 11, 88, 44);
     _stereoButton.layer.cornerRadius = 11;
-    _stereoButton.titleLabel.font = [UIFont boldSystemFontOfSize:19];
+    _stereoButton.titleLabel.font = [UIFont boldSystemFontOfSize:18];
     [_stereoButton addTarget:self
                       action:@selector(toggleStereo:)
             forControlEvents:UIControlEventTouchUpInside];
     [_stereoPanel addSubview:_stereoButton];
 
-    _depthLabel = [[UILabel alloc] initWithFrame:CGRectMake(112, 6, 278, 18)];
+    _modeSelector = [[UISegmentedControl alloc] initWithItems:@[@"Pop-out", @"Profondita'"]];
+    _modeSelector.frame = CGRectMake(106, 15, 184, 36);
+    _modeSelector.selectedSegmentIndex = [self currentDepthMode];
+    _modeSelector.tintColor = [UIColor whiteColor];
+    if (@available(iOS 13.0, *)) {
+        _modeSelector.selectedSegmentTintColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+        [_modeSelector setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor]}
+                                     forState:UIControlStateNormal];
+    }
+    [_modeSelector addTarget:self
+                      action:@selector(depthModeChanged:)
+            forControlEvents:UIControlEventValueChanged];
+    [_stereoPanel addSubview:_modeSelector];
+
+    _depthLabel = [[UILabel alloc] initWithFrame:CGRectMake(300, 8, 250, 18)];
     _depthLabel.font = [UIFont systemFontOfSize:13];
     _depthLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
     [_stereoPanel addSubview:_depthLabel];
 
-    _depthSlider = [[UISlider alloc] initWithFrame:CGRectMake(110, 24, 282, 30)];
+    _depthSlider = [[UISlider alloc] initWithFrame:CGRectMake(298, 26, 254, 30)];
     _depthSlider.minimumValue = 0.0f;
     _depthSlider.maximumValue = 1.0f;
     _depthSlider.value = amount;
@@ -427,7 +448,89 @@
     [self.view addSubview:_stereoPanel];
     [self.view bringSubviewToFront:_stereoPanel];
 
+    // Qualsiasi tocco riporta il pannello. minimumPressDuration a zero fa
+    // scattare il riconoscitore gia' al contatto, e cancelsTouchesInView a NO
+    // lascia passare il tocco ai controlli di gioco sottostanti.
+    UILongPressGestureRecognizer* wake =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(wakePanel:)];
+    wake.minimumPressDuration = 0.0;
+    wake.cancelsTouchesInView = NO;
+    wake.delaysTouchesBegan = NO;
+    wake.delaysTouchesEnded = NO;
+    wake.delegate = self;
+    [self.view addGestureRecognizer:wake];
+
     [self refreshStereoControls:on];
+    [self schedulePanelHide];
+}
+
+- (NSInteger)currentDepthMode {
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    return [defaults objectForKey:@"xrDepthMode"] == nil ? 1 : [defaults integerForKey:@"xrDepthMode"];
+}
+
+/// Il piano di convergenza decide quale profondita' cade sullo schermo.
+/// Portandolo in avanti quasi tutta la scena ha disparita' positiva ed esce
+/// verso l'osservatore; portandolo indietro la scena sprofonda dentro lo
+/// schermo, che affatica molto meno la vista.
+- (float)convergenceForMode:(NSInteger)mode {
+    return mode == 0 ? 0.15f : 0.65f;
+}
+
+- (void)depthModeChanged:(UISegmentedControl *)sender {
+    [[NSUserDefaults standardUserDefaults] setInteger:sender.selectedSegmentIndex
+                                               forKey:@"xrDepthMode"];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"XRDepthModeChanged"
+                      object:@([self convergenceForMode:sender.selectedSegmentIndex])];
+    [self schedulePanelHide];
+}
+
+#pragma mark - Comparsa e scomparsa del pannello
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+
+- (void)wakePanel:(UIGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) {
+        return;
+    }
+    [self showPanel];
+}
+
+- (void)showPanel {
+    if (_stereoPanel == nil) {
+        return;
+    }
+    _stereoPanel.hidden = NO;
+    [UIView animateWithDuration:0.15 animations:^{
+        self->_stereoPanel.alpha = 1.0;
+    }];
+    [self schedulePanelHide];
+}
+
+/// Cinque secondi di inattivita' e il pannello sparisce: su un OLED i pixel
+/// spenti non consumano, e lasciare comandi fissi su uno schermo che resta nero
+/// per ore e' anche un invito alla ritenzione d'immagine.
+- (void)schedulePanelHide {
+    [_panelHideTimer invalidate];
+    _panelHideTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                       target:self
+                                                     selector:@selector(hidePanel)
+                                                     userInfo:nil
+                                                      repeats:NO];
+}
+
+- (void)hidePanel {
+    [UIView animateWithDuration:0.4 animations:^{
+        self->_stereoPanel.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        if (finished) {
+            self->_stereoPanel.hidden = YES;
+        }
+    }];
 }
 
 - (void)refreshStereoControls:(BOOL)on {
@@ -442,6 +545,8 @@
     _depthSlider.enabled = on;
     _depthSlider.alpha = on ? 1.0 : 0.35;
     _depthLabel.alpha = on ? 1.0 : 0.35;
+    _modeSelector.enabled = on;
+    _modeSelector.alpha = on ? 1.0 : 0.35;
     _depthLabel.text = [NSString stringWithFormat:@"Profondita'  %d%%",
                         (int)roundf(_depthSlider.value * 100.0f)];
 }
@@ -453,6 +558,7 @@
 
     [self refreshStereoControls:on];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"XRStereoToggled" object:@(on)];
+    [self schedulePanelHide];
 }
 
 - (void)depthChanged:(UISlider *)sender {
@@ -461,6 +567,7 @@
                         (int)roundf(sender.value * 100.0f)];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"XRDepthAmountChanged"
                                                         object:@(sender.value)];
+    [self schedulePanelHide];
 }
 
 - (void)removeExtScreen {
@@ -468,9 +575,12 @@
     _extWindow.hidden = YES;
     _renderView.bounds = _deviceWindow.bounds;
     _renderView.frame = _deviceWindow.frame;
+    [_panelHideTimer invalidate];
+    _panelHideTimer = nil;
     [_stereoPanel removeFromSuperview];
     _stereoPanel = nil;
     _stereoButton = nil;
+    _modeSelector = nil;
     _depthSlider = nil;
     _depthLabel = nil;
     [self.view insertSubview:_renderView atIndex:0];

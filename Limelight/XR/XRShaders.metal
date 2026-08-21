@@ -47,6 +47,7 @@ struct XRWarpUniforms {
     float eyeSign;         // +1 occhio sinistro, -1 destro
     float zoom;
     float searchRadius;    // in unita' UV, pari a maxDisparity
+    float occlusionBias;   // quanto la vicinanza puo' battere l'errore
     int   searchTaps;
 };
 
@@ -157,16 +158,21 @@ kernel void xr_disparity_build(texture2d<float, access::sample> stableDepth [[te
     // Upsampling bilaterale congiunto: i vicini che somigliano al pixel guida
     // pesano di piu'. E' quello che tiene i bordi della profondita' incollati
     // ai bordi degli oggetti, invece di produrre aloni.
+    // Finestra 5x5 invece di 3x3. Una mappa di disparita' piu' morbida produce
+    // molti meno artefatti di warp: le discontinuita' nette sono proprio cio'
+    // che genera buchi e contorni raddoppiati, mentre la profondita' percepita
+    // cambia pochissimo.
     float sumWeight = 0.0;
     float sumDepth = 0.0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
             float2 offset = float2(dx, dy) * texel;
             float d = stableDepth.sample(smp, uv + offset).r;
             float l = lumaSmall.sample(smp, uv + offset).r;
 
             float colorDist = (l - guide) / max(u.edgeSigma, 0.001);
-            float spatial = (dx == 0 && dy == 0) ? 1.0 : 0.6;
+            float radius2 = float(dx * dx + dy * dy);
+            float spatial = exp(-radius2 / 6.0);
             float weight = spatial * exp(-colorDist * colorDist);
 
             sumDepth += d * weight;
@@ -228,10 +234,10 @@ fragment float4 xr_fragment_warp(XRVertexOut in [[stage_in]],
     // piu' vicina all'osservatore, che nella realta' e' quella che copre
     // l'altra. Un warp forward lascerebbe invece buchi neri sui bordi.
     float bestDisparity = 0.0;
-    float bestError = 1e9;
+    float bestScore = 1e9;
     bool  found = false;
 
-    const int taps = max(u.searchTaps, 2);
+    const int taps = clamp(u.searchTaps, 4, 48);
     const float step = (2.0 * u.searchRadius) / float(taps - 1);
 
     for (int i = 0; i < taps; i++) {
@@ -242,17 +248,16 @@ fragment float4 xr_fragment_warp(XRVertexOut in [[stage_in]],
         float mapped = candidateX + u.eyeSign * d;
         float error = abs(mapped - uv.x);
 
-        // Accettiamo solo candidati che cadono entro mezzo passo di ricerca,
-        // altrimenti si prenderebbero corrispondenze inventate.
-        if (error < step) {
-            bool better = !found
-                || (d > bestDisparity + 1e-6)
-                || (abs(d - bestDisparity) <= 1e-6 && error < bestError);
-            if (better) {
-                bestDisparity = d;
-                bestError = error;
-                found = true;
-            }
+        // A dominare e' l'errore di corrispondenza; la vicinanza interviene solo
+        // come spareggio fra candidati altrettanto plausibili. Facendo vincere
+        // sempre il piu' vicino, come prima, il soggetto in primo piano veniva
+        // spalmato sullo sfondo e i contorni apparivano raddoppiati.
+        float score = error - d * u.occlusionBias;
+
+        if (error < step && score < bestScore) {
+            bestScore = score;
+            bestDisparity = d;
+            found = true;
         }
     }
 

@@ -26,7 +26,7 @@ static const float kHighPercentile = 0.98f;
 
 // Quanto lentamente si muove l'intervallo di profondita'. Lento e' meglio: un
 // intervallo che insegue la scena fa "pompare" tutta la profondita'.
-static const float kRangeSmoothing = 0.05f;
+static const float kRangeSmoothing = 0.02f;
 
 typedef struct { vector_float2 sourceScale; } XRPrepareUniforms;
 
@@ -48,6 +48,7 @@ typedef struct {
     float eyeSign;
     float zoom;
     float searchRadius;
+    float occlusionBias;
     int   searchTaps;
 } XRWarpUniforms;
 
@@ -126,7 +127,10 @@ typedef struct {
     _inFlight = dispatch_semaphore_create(2);
     _maxDisparity = 0.012f;
     _convergence = 0.35f;
-    _zoom = 1.0f;
+    // Un margine di ritaglio e' indispensabile: il warp sposta anche i pixel di
+    // bordo, e senza margine il bordo stesso diventa una linea ondulata che
+    // segue il profilo di profondita' della scena.
+    _zoom = 1.05f;
     _stereoEnabled = YES;
 
     Log(LOG_I, @"XR: renderer stereo pronto su %@", _device.name);
@@ -382,10 +386,14 @@ typedef struct {
     [stabilize setTexture:_stableDepth[current] atIndex:4];
     [stabilize setBuffer:_histogramBuffer offset:0 atIndex:0];
 
+    // Filtraggio molto piu' deciso di prima. L'alpha adattivo era tarato per il
+    // video: in un gioco la telecamera muove tutta l'inquadratura, ogni pixel
+    // risulta "in movimento", il filtro si spegneva sempre e restava lo
+    // sfarfallio nudo, percepito come un ondeggiamento subacqueo.
     XRStabilizeUniforms stabilizeUniforms = {
-        .alphaMin = 0.12f,
-        .alphaMax = 0.85f,
-        .motionGain = 6.0f,
+        .alphaMin = 0.05f,
+        .alphaMax = 0.30f,
+        .motionGain = 1.5f,
     };
     [stabilize setBytes:&stabilizeUniforms length:sizeof(stabilizeUniforms) atIndex:1];
     [self dispatch:stabilize pipeline:_stabilizePipeline width:kXRDepthWidth height:kXRDepthHeight];
@@ -403,7 +411,7 @@ typedef struct {
         .depthHi = _rangeInitialized ? _depthHi : 1.0f,
         .convergence = self.convergence,
         .maxDisparity = self.maxDisparity,
-        .edgeSigma = 0.08f,
+        .edgeSigma = 0.12f,
     };
     [disparity setBytes:&disparityUniforms length:sizeof(disparityUniforms) atIndex:0];
     [self dispatch:disparity pipeline:_disparityPipeline width:kDisparityWidth height:kDisparityHeight];
@@ -452,7 +460,10 @@ typedef struct {
             .eyeSign = stereo ? eyeSigns[eye] : 0.0f,
             .zoom = self.zoom,
             .searchRadius = self.maxDisparity,
-            .searchTaps = 16,
+            .occlusionBias = 0.12f,
+            // Piu' campioni significa passo di ricerca piu' fine, quindi
+            // tolleranza piu' stretta sulle corrispondenze e meno bave.
+            .searchTaps = 32,
         };
         [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];

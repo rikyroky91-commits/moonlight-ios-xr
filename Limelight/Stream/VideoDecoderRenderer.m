@@ -166,6 +166,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         : [xrDefaults floatForKey:@"xrDepthAmount"];
     xrRenderer.maxDisparity = depthAmount * 0.025f;
 
+    NSInteger depthMode = [xrDefaults objectForKey:@"xrDepthMode"] == nil
+        ? 1
+        : [xrDefaults integerForKey:@"xrDepthMode"];
+    xrRenderer.convergence = (depthMode == 0) ? 0.15f : 0.65f;
+
     // Il video esce solo dagli occhiali: sul telefono il display layer resta
     // nascosto e lo schermo fa da pannello comandi.
     displayLayer.hidden = YES;
@@ -187,6 +192,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
 {
     float amount = [notification.object floatValue];
     xrRenderer.maxDisparity = amount * 0.025f;
+}
+
+- (void)xrDepthModeChanged:(NSNotification*)notification
+{
+    xrRenderer.convergence = [notification.object floatValue];
 }
 
 - (BOOL)xrEnsureSessionForFormat:(CMVideoFormatDescriptionRef)desc
@@ -292,6 +302,10 @@ static void XRDecompressionCallback(void* decompressionOutputRefCon,
     [center addObserver:self
                selector:@selector(xrDepthAmountChanged:)
                    name:@"XRDepthAmountChanged"
+                 object:nil];
+    [center addObserver:self
+               selector:@selector(xrDepthModeChanged:)
+                   name:@"XRDepthModeChanged"
                  object:nil];
 
     return self;
